@@ -4,6 +4,16 @@ name: Movie Automation
 # Ek baar Run dabao, tab band kar do — output seedha Google Drive me
 # ek hi file (movie_processed.mp4) ke roop me aa jayega. Koi parts
 # nahi, koi join nahi.
+#
+# Drive connect karne ke 2 tareeke hain — workflow khud dekh lega ke
+# kaunsa secret daala hai:
+#   Tareeka 1 (rclone): secret RCLONE_CONFIG
+#   Tareeka 2 (service account): secrets GDRIVE_SA_JSON + GDRIVE_FOLDER_ID
+#
+# YouTube download ke liye (agar "Sign in to confirm you're not a bot"
+# aaye): secret YOUTUBE_COOKIES — apne browser se export ki hui
+# cookies.txt ka poora text. Bina iske YouTube GitHub ke server ko
+# bot samajh ke rok deta hai.
 
 on:
   workflow_dispatch:
@@ -36,12 +46,23 @@ jobs:
           ffmpeg -version | head -1
 
       - name: yt-dlp install karo
-        run: pip install -q yt-dlp
+        run: |
+          pip install -q yt-dlp
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+
+      - name: YouTube cookies tayyar karo (agar secret hai)
+        if: ${{ secrets.YOUTUBE_COOKIES != '' }}
+        env:
+          YT_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: printf '%s' "$YT_COOKIES" > cookies.txt
 
       - name: Movie aur overlay download karo
         run: |
-          yt-dlp --no-playlist --retries 3 -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o movie.mp4 "${{ inputs.movie_url }}"
-          yt-dlp --no-playlist --retries 3 -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o overlay.mp4 "${{ inputs.overlay_url }}"
+          args=()
+          [ -f cookies.txt ] && args+=(--cookies cookies.txt)
+          yt-dlp --no-playlist --retries 3 "${args[@]}" -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o movie.mp4 "${{ inputs.movie_url }}"
+          yt-dlp --no-playlist --retries 3 "${args[@]}" -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o overlay.mp4 "${{ inputs.overlay_url }}"
           ls -lh movie.mp4 overlay.mp4
 
       - name: Movie process karo
@@ -60,17 +81,33 @@ jobs:
           curl https://rclone.org/install.sh | sudo bash
           rclone version
 
-      - name: Google Drive connect karo
+      - name: Google Drive connect karo (service account)
+        if: ${{ secrets.GDRIVE_SA_JSON != '' }}
+        env:
+          SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
           mkdir -p ~/.config/rclone
-          printf '%s' "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          printf '%s' "$SA_JSON" > sa.json
+          printf '[gdrive]\ntype = drive\nscope = drive\nservice_account_file = sa.json\nroot_folder_id = %s\n' "$FOLDER_ID" > ~/.config/rclone/rclone.conf
+          echo "UPLOAD_TARGET=gdrive:/" >> "$GITHUB_ENV"
+          rclone lsd gdrive: --max-depth 1
+
+      - name: Google Drive connect karo (rclone config)
+        if: ${{ secrets.GDRIVE_SA_JSON == '' }}
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          echo "UPLOAD_TARGET=gdrive:MovieEdit/" >> "$GITHUB_ENV"
           rclone lsd gdrive: --max-depth 1
 
       - name: Output Drive me upload karo (ek hi file)
-        run: rclone copy movie_processed.mp4 gdrive:MovieEdit/ --retries 3
+        run: rclone copy movie_processed.mp4 "$UPLOAD_TARGET" --retries 3
 
       - name: Server se sab delete karo
         run: |
-          rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4 movie_processed.mp4
+          rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4 movie_processed.mp4 sa.json cookies.txt
           ls -la
           echo "Server se movie, overlay aur output sab delete kar diye."
