@@ -1,0 +1,76 @@
+name: Movie Automation
+
+# GitHub ke free server par movie process karo.
+# Ek baar Run dabao, tab band kar do — output seedha Google Drive me
+# ek hi file (movie_processed.mp4) ke roop me aa jayega. Koi parts
+# nahi, koi join nahi.
+
+on:
+  workflow_dispatch:
+    inputs:
+      movie_url:
+        description: "Movie ka YouTube link"
+        required: true
+        type: string
+      overlay_url:
+        description: "Overlay clip ka YouTube link"
+        required: true
+        type: string
+      test_only:
+        description: "Sirf 6 minute ka test chalao (pehli baar ke liye)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Files lao (repo se script)
+        uses: actions/checkout@v4
+
+      - name: ffmpeg check karo (na ho to install karo)
+        run: |
+          which ffmpeg || sudo apt-get update && sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+
+      - name: yt-dlp install karo
+        run: pip install -q yt-dlp
+
+      - name: Movie aur overlay download karo
+        run: |
+          yt-dlp --no-playlist --retries 3 -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o movie.mp4 "${{ inputs.movie_url }}"
+          yt-dlp --no-playlist --retries 3 -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o overlay.mp4 "${{ inputs.overlay_url }}"
+          ls -lh movie.mp4 overlay.mp4
+
+      - name: Movie process karo
+        run: |
+          if [ "${{ inputs.test_only }}" = "true" ]; then
+            ffmpeg -y -v error -ss 0 -t 360 -i movie.mp4 -c copy test_movie.mp4
+            python3 movie_automation.py test_movie.mp4 overlay.mp4 -o test_processed.mp4 --preset veryfast
+            cp test_processed.mp4 movie_processed.mp4
+          else
+            python3 movie_automation.py movie.mp4 overlay.mp4 -o movie_processed.mp4 --preset veryfast
+          fi
+          ls -lh movie_processed.mp4
+
+      - name: rclone install karo
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Google Drive connect karo
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          rclone lsd gdrive: --max-depth 1
+
+      - name: Output Drive me upload karo (ek hi file)
+        run: rclone copy movie_processed.mp4 gdrive:MovieEdit/ --retries 3
+
+      - name: Server se sab delete karo
+        run: |
+          rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4 movie_processed.mp4
+          ls -la
+          echo "Server se movie, overlay aur output sab delete kar diye."
