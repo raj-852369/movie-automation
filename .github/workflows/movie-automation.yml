@@ -69,8 +69,21 @@ jobs:
         run: |
           args=()
           [ -f cookies.txt ] && args+=(--cookies cookies.txt)
-          yt-dlp --no-playlist --retries 3 "${args[@]}" -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o movie.mp4 "${{ inputs.movie_url }}"
-          yt-dlp --no-playlist --retries 3 "${args[@]}" -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o overlay.mp4 "${{ inputs.overlay_url }}"
+          # EJS solver: YouTube ke "n challenge" (JS challenge) ko solve
+          # karne ke liye chahiye — bina iske formats hi nahi milte
+          # ("Only images are available" / "Requested format is not
+          # available"). Agar pehla tareeka fail ho to android client
+          # se automatic dobara try karta hai.
+          download() {
+            local url="$1" out="$2"
+            if yt-dlp --no-playlist --retries 3 "${args[@]}" --remote-components ejs:github -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o "$out" "$url"; then
+              return 0
+            fi
+            echo "Pehla tareeka fail — android client se dobara try kar raha hoon..."
+            yt-dlp --no-playlist --retries 3 "${args[@]}" --remote-components ejs:github --extractor-args "youtube:player_client=android" -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o "$out" "$url"
+          }
+          download "${{ inputs.movie_url }}" movie.mp4
+          download "${{ inputs.overlay_url }}" overlay.mp4
           ls -lh movie.mp4 overlay.mp4
 
       - name: Movie process karo
