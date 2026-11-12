@@ -5,15 +5,19 @@ name: Movie Automation
 # ek hi file (movie_processed.mp4) ke roop me aa jayega. Koi parts
 # nahi, koi join nahi.
 #
-# Drive connect karne ke 2 tareeke hain — workflow khud dekh lega ke
-# kaunsa secret daala hai:
+# Drive connect karne ke 2 tareeke hain:
 #   Tareeka 1 (rclone): secret RCLONE_CONFIG
 #   Tareeka 2 (service account): secrets GDRIVE_SA_JSON + GDRIVE_FOLDER_ID
 #
 # YouTube download ke liye (agar "Sign in to confirm you're not a bot"
 # aaye): secret YOUTUBE_COOKIES — apne browser se export ki hui
-# cookies.txt ka poora text. Bina iske YouTube GitHub ke server ko
-# bot samajh ke rok deta hai.
+# cookies.txt ka poora text.
+#
+# IMPORTANT: GitHub `secrets` ko step ke `if:` me use karne nahi
+# deta (error: "Unrecognized named-value: 'secrets'"). Isliye neeche
+# secrets ko pehle job ke `env:` me daala gaya hai (HAS_COOKIES,
+# HAS_SA, HAS_RCLONE), aur steps sirf `env.HAS_...` par check karte
+# hain. `if:` wali lines me kabhi `secrets.` mat likho.
 
 on:
   workflow_dispatch:
@@ -36,6 +40,10 @@ jobs:
   process:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      HAS_COOKIES: ${{ secrets.YOUTUBE_COOKIES != '' }}
+      HAS_SA: ${{ secrets.GDRIVE_SA_JSON != '' }}
+      HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
     steps:
       - name: Files lao (repo se script)
         uses: actions/checkout@v4
@@ -52,7 +60,7 @@ jobs:
           echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
 
       - name: YouTube cookies tayyar karo (agar secret hai)
-        if: ${{ secrets.YOUTUBE_COOKIES != '' }}
+        if: ${{ env.HAS_COOKIES == 'true' }}
         env:
           YT_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
         run: printf '%s' "$YT_COOKIES" > cookies.txt
@@ -82,7 +90,7 @@ jobs:
           rclone version
 
       - name: Google Drive connect karo (service account)
-        if: ${{ secrets.GDRIVE_SA_JSON != '' }}
+        if: ${{ env.HAS_SA == 'true' }}
         env:
           SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
           FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
@@ -94,7 +102,7 @@ jobs:
           rclone lsd gdrive: --max-depth 1
 
       - name: Google Drive connect karo (rclone config)
-        if: ${{ secrets.GDRIVE_SA_JSON == '' }}
+        if: ${{ env.HAS_SA != 'true' && env.HAS_RCLONE == 'true' }}
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
         run: |
@@ -104,7 +112,9 @@ jobs:
           rclone lsd gdrive: --max-depth 1
 
       - name: Output Drive me upload karo (ek hi file)
-        run: rclone copy movie_processed.mp4 "$UPLOAD_TARGET" --retries 3
+        run: |
+          if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — GDRIVE_SA_JSON + GDRIVE_FOLDER_ID ya RCLONE_CONFIG secret check karo."; exit 1; fi
+          rclone copy movie_processed.mp4 "$UPLOAD_TARGET" --retries 3
 
       - name: Server se sab delete karo
         run: |
