@@ -6,8 +6,16 @@ name: Movie Automation
 # nahi, koi join nahi.
 #
 # Drive connect karne ke 2 tareeke hain:
-#   Tareeka 1 (rclone): secret RCLONE_CONFIG
-#   Tareeka 2 (service account): secrets GDRIVE_SA_JSON + GDRIVE_FOLDER_ID
+#   Tareeka 1 (rclone): secret RCLONE_CONFIG — TUMHARE apne Google
+#     account se login hota hai, isliye tumhara 15 GB quota use hota
+#     hai. PERSONAL Gmail account ke liye YAHI tareeka chalta hai.
+#   Tareeka 2 (service account): secrets GDRIVE_SA_JSON +
+#     GDRIVE_FOLDER_ID — sirf Google Workspace (Shared Drive) par
+#     chalta hai. Personal Drive par service account ko Google koi
+#     storage hi nahi deta ("Error 403: Service Accounts do not have
+#     storage quota"), isliye upload fail hota hai chahe folder share
+#     hi kyun na ho. Isliye rclone (Tareeka 1) ko pehle check kiya
+#     jata hai: agar RCLONE_CONFIG hai to wahi use hoga.
 #
 # YouTube download ke liye (agar "Sign in to confirm you're not a bot"
 # aaye): secret YOUTUBE_COOKIES — apne browser se export ki hui
@@ -103,7 +111,7 @@ jobs:
           rclone version
 
       - name: Google Drive connect karo (service account)
-        if: ${{ env.HAS_SA == 'true' }}
+        if: ${{ env.HAS_SA == 'true' && env.HAS_RCLONE != 'true' }}
         env:
           SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
           FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
@@ -115,7 +123,7 @@ jobs:
           rclone lsd gdrive: --max-depth 1
 
       - name: Google Drive connect karo (rclone config)
-        if: ${{ env.HAS_SA != 'true' && env.HAS_RCLONE == 'true' }}
+        if: ${{ env.HAS_RCLONE == 'true' }}
         env:
           RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
         run: |
