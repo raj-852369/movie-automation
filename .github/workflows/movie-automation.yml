@@ -8,6 +8,19 @@ name: Movie Automation
 # Run dabate waqt ek choice bhi poochta hai: "both" (dono), "full"
 # (sirf poori movie) ya "parts" (sirf parts). Default: both.
 #
+# Disk space ka khayal (2026-11-15 ka "No space left on device" fix):
+# GitHub ke server par sirf ~14 GB jagah hoti hai. 2 ghante ki movie
+# par ek saath movie.mp4 + overlay.mp4 + full output + parts aa jayein
+# to disk bhar jati hai — pichhli baar part_52 par aise hi fail hua
+# tha, aur usi wajah se full movie bhi Drive nahi gayi thi. Isliye:
+#   (1) shuru me hi bina kaam ke bade tools hata kar ~10 GB jagah
+#       khali ki jati hai,
+#   (2) pehle POORI movie upload hoti hai, phir original files delete
+#       karke parts bante hain — parts fail bhi ho jayein to full movie
+#       pehle se Drive me hogi,
+#   (3) cleanup hamesha chalta hai (if: always()), chahe koi step fail
+#       ho jaye.
+#
 # Drive connect karne ke 2 tareeke hain:
 #   Tareeka 1 (rclone): secret RCLONE_CONFIG — TUMHARE apne Google
 #     account se login hota hai, isliye tumhara 15 GB quota use hota
@@ -69,6 +82,16 @@ jobs:
       - name: Files lao (repo se script)
         uses: actions/checkout@v4
 
+      - name: Server par jagah khali karo (pehle se)
+        run: |
+          df -h
+          # GitHub ke server par pehle se bade tools pade hote hain jo
+          # humein chahiye hi nahi (dotnet, ghc, boost, android SDK).
+          # Inhe hata kar ~10 GB jagah milti hai — 2 ghante ki movie
+          # ke full file + parts ke liye zaroori hai.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android || true
+          df -h
+
       - name: ffmpeg check karo (na ho to install karo)
         run: |
           which ffmpeg || sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -107,20 +130,18 @@ jobs:
           download "${{ inputs.overlay_url }}" overlay.mp4
           ls -lh movie.mp4 overlay.mp4
 
-      - name: Movie process karo
+      - name: Movie process karo (sirf poori movie — parts baad me)
         run: |
-          # "full" chuna ho to parts banane hi nahi; warna --parts 120
-          if [ "$OUTPUT_TYPE" = "full" ]; then PARTS_FLAG=""; else PARTS_FLAG="--parts 120"; fi
+          # Parts yahan NAHI bante: pehle poori movie banti hai aur
+          # Drive me upload hoti hai, parts uske BAAD bante hain.
           if [ "${{ inputs.test_only }}" = "true" ]; then
             ffmpeg -y -v error -ss 0 -t 360 -i movie.mp4 -c copy test_movie.mp4
-            python3 movie_automation.py test_movie.mp4 overlay.mp4 -o test_processed.mp4 --preset veryfast $PARTS_FLAG
+            python3 movie_automation.py test_movie.mp4 overlay.mp4 -o test_processed.mp4 --preset veryfast
             cp test_processed.mp4 movie_processed.mp4
-            if [ -d test_processed_parts ]; then cp -r test_processed_parts movie_processed_parts; fi
           else
-            python3 movie_automation.py movie.mp4 overlay.mp4 -o movie_processed.mp4 --preset veryfast $PARTS_FLAG
+            python3 movie_automation.py movie.mp4 overlay.mp4 -o movie_processed.mp4 --preset veryfast
           fi
           ls -lh movie_processed.mp4
-          if [ -d movie_processed_parts ]; then ls movie_processed_parts | head; fi
 
       - name: rclone install karo
         run: |
@@ -149,19 +170,33 @@ jobs:
           echo "UPLOAD_TARGET=gdrive:MovieEdit/" >> "$GITHUB_ENV"
           rclone lsd gdrive: --max-depth 1
 
-      - name: Output Drive me upload karo (choice ke hisaab se)
+      - name: Poori movie Drive me upload karo (choice ke hisaab se)
+        if: ${{ env.OUTPUT_TYPE != 'parts' }}
         run: |
           if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — GDRIVE_SA_JSON + GDRIVE_FOLDER_ID ya RCLONE_CONFIG secret check karo."; exit 1; fi
-          # "parts" chuna ho to poori file upload hi nahi hogi
-          if [ "$OUTPUT_TYPE" != "parts" ]; then
-            rclone copy movie_processed.mp4 "$UPLOAD_TARGET" --retries 3
-          fi
-          # "full" chuna ho to parts banenge hi nahi / upload nahi honge
-          if [ "$OUTPUT_TYPE" != "full" ] && [ -d movie_processed_parts ]; then
-            rclone copy movie_processed_parts "${UPLOAD_TARGET}parts/" --retries 3
-          fi
+          rclone copy movie_processed.mp4 "$UPLOAD_TARGET" --retries 3
+
+      - name: Original files delete karo (parts ke liye jagah banao)
+        run: |
+          # Poori movie ban chuki hai (aur "parts" na chuna ho to Drive
+          # me upload bhi ho chuki hai). Original movie + overlay ab
+          # kaam ke nahi — inhe hata kar parts ke liye jagah banti hai.
+          # Pichhli baar yahi jagah na milne par "No space left" aaya
+          # tha. movie_processed.mp4 ko mat chhedo — usi se parts bante
+          # hain.
+          rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4
+          df -h
+
+      - name: Parts banao aur Drive me upload karo
+        if: ${{ env.OUTPUT_TYPE != 'full' }}
+        run: |
+          if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — GDRIVE_SA_JSON + GDRIVE_FOLDER_ID ya RCLONE_CONFIG secret check karo."; exit 1; fi
+          df -h
+          python3 movie_automation.py --split-only movie_processed.mp4 --parts 120
+          rclone copy movie_processed_parts "${UPLOAD_TARGET}parts/" --retries 3
 
       - name: Server se sab delete karo
+        if: always()
         run: |
           rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4 movie_processed.mp4 sa.json cookies.txt
           rm -rf test_processed_parts movie_processed_parts
