@@ -21,11 +21,15 @@ Ek movie par ye sab automatically lagata hai:
            hai. Parts fast kaate jate hain (bina dobara encode), isliye
            har part lagbhag 2 minute ka hota hai — keyframe ki wajah
            se kuch second ka farak ho sakta hai.
+7. SPLIT-ONLY - Agar file pehle se processed hai (jaise GitHub par
+           full movie upload hone ke baad) to sirf parts banao:
+           --split-only movie_processed.mp4 --parts 120
 
 Usage:
     python movie_automation.py movie.mp4 overlay.mp4
     python movie_automation.py movie.mp4 overlay.mp4 -o final.mp4
     python movie_automation.py movie.mp4 overlay.mp4 --parts 120
+    python movie_automation.py --split-only movie_processed.mp4 --parts 120
 
     movie.mp4   : original movie (tumhari, rights wali)
     overlay.mp4 : overlay karne wali dusri clip (optional bhi hai:
@@ -215,12 +219,24 @@ def main():
     ap.add_argument("--preset", default="medium", help="x264 preset (default medium)")
     ap.add_argument("--no-overlay", action="store_true", help="overlay mat lagao")
     ap.add_argument("--parts", type=float, default=None, help="final output ko itne sec ke parts me kaato (120 = 2 min; default off)")
+    ap.add_argument("--split-only", action="store_true",
+                    help="sirf parts banao: movie argument ek pehle se processed file hai (jaise movie_processed.mp4); dobara process nahi hoga")
     ap.add_argument("--keep-temp", action="store_true", help="temp segment files mat hatao")
     args = ap.parse_args()
 
     for tool in ("ffmpeg", "ffprobe"):
         if shutil.which(tool) is None:
             raise SystemExit(f"'{tool}' nahi mila. Pehle ffmpeg install karo: https://ffmpeg.org/download.html")
+
+    # ---- SPLIT-ONLY mode: pehle se bani file ke sirf parts banao
+    if args.split_only:
+        src = Path(args.movie)
+        if not src.exists():
+            raise SystemExit(f"File nahi mili: {src}")
+        part_len = args.parts if args.parts else 120.0
+        split_parts(src, part_len)
+        print(f"DONE (split only): {src.stem}_parts/")
+        return
 
     movie = Path(args.movie)
     if not movie.exists():
