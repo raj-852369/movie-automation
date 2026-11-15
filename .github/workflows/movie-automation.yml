@@ -2,8 +2,11 @@ name: Movie Automation
 
 # GitHub ke free server par movie process karo.
 # Ek baar Run dabao, tab band kar do — output seedha Google Drive me
-# ek hi file (movie_processed.mp4) ke roop me aa jayega. Koi parts
-# nahi, koi join nahi.
+# aa jayega: poori movie ek hi file (movie_processed.mp4) + uske
+# 2-2 minute ke parts MovieEdit/parts/ folder me
+# (part_01.mp4, part_02.mp4 ... — 2 ghante ki movie ke ~60 parts).
+# Run dabate waqt ek choice bhi poochta hai: "both" (dono), "full"
+# (sirf poori movie) ya "parts" (sirf parts). Default: both.
 #
 # Drive connect karne ke 2 tareeke hain:
 #   Tareeka 1 (rclone): secret RCLONE_CONFIG — TUMHARE apne Google
@@ -43,6 +46,15 @@ on:
         required: false
         default: false
         type: boolean
+      output_type:
+        description: "Kya chahiye — poori movie, parts, ya dono?"
+        required: false
+        default: "both"
+        type: choice
+        options:
+          - both
+          - full
+          - parts
 
 jobs:
   process:
@@ -52,6 +64,7 @@ jobs:
       HAS_COOKIES: ${{ secrets.YOUTUBE_COOKIES != '' }}
       HAS_SA: ${{ secrets.GDRIVE_SA_JSON != '' }}
       HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
+      OUTPUT_TYPE: ${{ inputs.output_type }}
     steps:
       - name: Files lao (repo se script)
         uses: actions/checkout@v4
@@ -96,14 +109,18 @@ jobs:
 
       - name: Movie process karo
         run: |
+          # "full" chuna ho to parts banane hi nahi; warna --parts 120
+          if [ "$OUTPUT_TYPE" = "full" ]; then PARTS_FLAG=""; else PARTS_FLAG="--parts 120"; fi
           if [ "${{ inputs.test_only }}" = "true" ]; then
             ffmpeg -y -v error -ss 0 -t 360 -i movie.mp4 -c copy test_movie.mp4
-            python3 movie_automation.py test_movie.mp4 overlay.mp4 -o test_processed.mp4 --preset veryfast
+            python3 movie_automation.py test_movie.mp4 overlay.mp4 -o test_processed.mp4 --preset veryfast $PARTS_FLAG
             cp test_processed.mp4 movie_processed.mp4
+            if [ -d test_processed_parts ]; then cp -r test_processed_parts movie_processed_parts; fi
           else
-            python3 movie_automation.py movie.mp4 overlay.mp4 -o movie_processed.mp4 --preset veryfast
+            python3 movie_automation.py movie.mp4 overlay.mp4 -o movie_processed.mp4 --preset veryfast $PARTS_FLAG
           fi
           ls -lh movie_processed.mp4
+          if [ -d movie_processed_parts ]; then ls movie_processed_parts | head; fi
 
       - name: rclone install karo
         run: |
@@ -132,13 +149,21 @@ jobs:
           echo "UPLOAD_TARGET=gdrive:MovieEdit/" >> "$GITHUB_ENV"
           rclone lsd gdrive: --max-depth 1
 
-      - name: Output Drive me upload karo (ek hi file)
+      - name: Output Drive me upload karo (choice ke hisaab se)
         run: |
           if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — GDRIVE_SA_JSON + GDRIVE_FOLDER_ID ya RCLONE_CONFIG secret check karo."; exit 1; fi
-          rclone copy movie_processed.mp4 "$UPLOAD_TARGET" --retries 3
+          # "parts" chuna ho to poori file upload hi nahi hogi
+          if [ "$OUTPUT_TYPE" != "parts" ]; then
+            rclone copy movie_processed.mp4 "$UPLOAD_TARGET" --retries 3
+          fi
+          # "full" chuna ho to parts banenge hi nahi / upload nahi honge
+          if [ "$OUTPUT_TYPE" != "full" ] && [ -d movie_processed_parts ]; then
+            rclone copy movie_processed_parts "${UPLOAD_TARGET}parts/" --retries 3
+          fi
 
       - name: Server se sab delete karo
         run: |
           rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4 movie_processed.mp4 sa.json cookies.txt
+          rm -rf test_processed_parts movie_processed_parts
           ls -la
           echo "Server se movie, overlay aur output sab delete kar diye."
