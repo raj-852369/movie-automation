@@ -11,14 +11,21 @@ Ek movie par ye sab automatically lagata hai:
 3. FADE   - Mirror shuru hote hi 1.5 second fade-in aur mirror khatam
            hote hi 1.5 second fade-out (fade to black).
 4. OVERLAY - Dusri clip ko poori movie par overlay karta hai:
-           blend/opacity 3.5% aur uski audio volume 5%.
+           blend/opacity 3% aur uski audio volume 5%.
            Overlay movie ke LAST tak chalega (chhota ho to loop hoga).
 5. HOURLY - Har 1 ghante me 4 baar ek hi halka sa video effect
            (saturation/brightness me halka badlav), taaki sab uniform lage.
+6. PARTS  - Agar --parts 120 diya ho to final output ko 2-2 minute ke
+           parts me kaat kar <output>_parts/ folder me rakh deta hai
+           (part_01.mp4, part_02.mp4 ...). Full file bhi alag se rehti
+           hai. Parts fast kaate jate hain (bina dobara encode), isliye
+           har part lagbhag 2 minute ka hota hai — keyframe ki wajah
+           se kuch second ka farak ho sakta hai.
 
 Usage:
     python movie_automation.py movie.mp4 overlay.mp4
     python movie_automation.py movie.mp4 overlay.mp4 -o final.mp4
+    python movie_automation.py movie.mp4 overlay.mp4 --parts 120
 
     movie.mp4   : original movie (tumhari, rights wali)
     overlay.mp4 : overlay karne wali dusri clip (optional bhi hai:
@@ -46,7 +53,7 @@ HOUR = 3600.0          # 1 ghanta
 HOURLY_AT = [600, 1500, 2400, 3300]   # har ghante ke andar 4 waqt (sec)
 HOURLY_LEN = 90.0      # har hourly effect kitne second ka
 HOURLY_EQ = "saturation=1.08:brightness=0.015:contrast=1.02"
-OVERLAY_OPACITY = 0.035   # 3.5% blend
+OVERLAY_OPACITY = 0.03   # 3% blend
 OVERLAY_VOLUME = 0.05     # 5% volume
 
 
@@ -160,6 +167,33 @@ def vf_chain(seg, args, w, h, fps):
     return ",".join(parts), out_dur
 
 
+def split_parts(out, part_len):
+    """Final output ko lagbhag `part_len` sec ke parts me kaato.
+
+    Fast tareeka: -c copy (dobara encode nahi), isliye kaat keyframe
+    par padta hai — har part lagbhag part_len sec ka hota hai, kuch
+    second upar-neeche ho sakta hai.
+    """
+    parts_dir = out.with_name(out.stem + "_parts")
+    parts_dir.mkdir(exist_ok=True)
+    cmd = ["ffmpeg", "-y", "-v", "error",
+           "-i", str(out),
+           "-f", "segment", "-segment_time", f"{part_len:.1f}",
+           "-segment_start_number", "1",
+           "-reset_timestamps", "1",
+           "-map", "0", "-c", "copy",
+           str(parts_dir / "part_%02d.mp4")]
+    run(cmd)
+    parts = sorted(parts_dir.glob("part_*.mp4"))
+    if not parts:
+        raise SystemExit(f"Parts nahi bane: {parts_dir}")
+    total = 0.0
+    for p in parts:
+        total += stream_info(p)[0]
+    print(f"Parts: {len(parts)} parts (lagbhag {part_len:.0f}s ke) -> {parts_dir} | kul {total:.1f} sec")
+    return parts_dir
+
+
 def main():
     ap = argparse.ArgumentParser(description="Movie automation: speed + mirror + fade + overlay + hourly effects")
     ap.add_argument("movie", help="original movie file")
@@ -175,11 +209,12 @@ def main():
                     help="hour ke andar effect ke waqt, sec me (default 600 1500 2400 3300)")
     ap.add_argument("--hourly-len", type=float, default=HOURLY_LEN, help="hourly effect length sec (default 90)")
     ap.add_argument("--hourly-eq", default=HOURLY_EQ, help="hourly effect (eq filter settings)")
-    ap.add_argument("--opacity", type=float, default=OVERLAY_OPACITY, help="overlay blend 0 to 1 (default 0.035)")
+    ap.add_argument("--opacity", type=float, default=OVERLAY_OPACITY, help="overlay blend 0 to 1 (default 0.03)")
     ap.add_argument("--overlay-volume", type=float, default=OVERLAY_VOLUME, help="overlay audio volume 0 to 1 (default 0.05)")
     ap.add_argument("--crf", type=int, default=20, help="video quality, kam = behtar (default 20)")
     ap.add_argument("--preset", default="medium", help="x264 preset (default medium)")
     ap.add_argument("--no-overlay", action="store_true", help="overlay mat lagao")
+    ap.add_argument("--parts", type=float, default=None, help="final output ko itne sec ke parts me kaato (120 = 2 min; default off)")
     ap.add_argument("--keep-temp", action="store_true", help="temp segment files mat hatao")
     args = ap.parse_args()
 
@@ -249,33 +284,37 @@ def main():
         if overlay is None:
             shutil.copy(base, out)
             print(f"DONE (bina overlay): {out}")
-            return
-        o_audio = stream_info(overlay)[4]
-        fc = [f"[1:v]scale={w}:{h},format=yuva420p,colorchannelmixer=aa={args.opacity}[ov]",
-              f"[0:v][ov]overlay=0:0,format=yuv420p[vout]"]
-        maps = ["-map", "[vout]"]
-        audio_opts: list = []
-        if has_audio and o_audio:
-            # overlay ki audio 5% volume par main audio ke saath mix
-            fc.append(f"[1:a]volume={args.overlay_volume}[aov]")
-            fc.append("[0:a][aov]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
-            maps += ["-map", "[aout]"]
-            audio_opts = ["-c:a", "aac", "-b:a", "160k"]
-        elif has_audio:
-            maps += ["-map", "0:a"]
-            audio_opts = ["-c:a", "aac", "-b:a", "160k"]
         else:
-            audio_opts = ["-an"]
-        cmd = (["ffmpeg", "-y", "-v", "error",
-                "-i", str(base), "-stream_loop", "-1", "-i", str(overlay),
-                "-filter_complex", ";".join(fc)]
-               + maps
-               + ["-c:v", "libx264", "-preset", args.preset,
-                  "-crf", str(args.crf), "-pix_fmt", "yuv420p"]
-               + audio_opts
-               + ["-t", f"{base_dur:.3f}", str(out)])
-        run(cmd)
+            o_audio = stream_info(overlay)[4]
+            fc = [f"[1:v]scale={w}:{h},format=yuva420p,colorchannelmixer=aa={args.opacity}[ov]",
+                  f"[0:v][ov]overlay=0:0,format=yuv420p[vout]"]
+            maps = ["-map", "[vout]"]
+            audio_opts: list = []
+            if has_audio and o_audio:
+                # overlay ki audio 5% volume par main audio ke saath mix
+                fc.append(f"[1:a]volume={args.overlay_volume}[aov]")
+                fc.append("[0:a][aov]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]")
+                maps += ["-map", "[aout]"]
+                audio_opts = ["-c:a", "aac", "-b:a", "160k"]
+            elif has_audio:
+                maps += ["-map", "0:a"]
+                audio_opts = ["-c:a", "aac", "-b:a", "160k"]
+            else:
+                audio_opts = ["-an"]
+            cmd = (["ffmpeg", "-y", "-v", "error",
+                    "-i", str(base), "-stream_loop", "-1", "-i", str(overlay),
+                    "-filter_complex", ";".join(fc)]
+                   + maps
+                   + ["-c:v", "libx264", "-preset", args.preset,
+                      "-crf", str(args.crf), "-pix_fmt", "yuv420p"]
+                   + audio_opts
+                   + ["-t", f"{base_dur:.3f}", str(out)])
+            run(cmd)
         print(f"DONE: {out} | duration {stream_info(out)[0]:.1f} sec")
+
+        # ---- STEP 4: 2-2 minute ke parts (agar --parts diya ho)
+        if args.parts:
+            split_parts(out, args.parts)
     finally:
         if args.keep_temp:
             print(f"Temp files rakhe hain: {tmp}")
