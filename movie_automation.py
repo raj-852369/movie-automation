@@ -194,11 +194,14 @@ def make_vertical_parts(parts_dir, args):
         raise SystemExit(f"Parts nahi mile: {parts_dir}")
     vdir = parts_dir.with_name(parts_dir.name + "_vertical")
     vdir.mkdir(exist_ok=True)
-    for p in parts:
+    for i, p in enumerate(parts):
         out_path = vdir / p.name
+        # Background blur aadhi resolution (540x960) par banta hai,
+        # phir 1080x1920 par scale hota hai — dikhne me wahi, par
+        # 3-4 guna tez (poori resolution par gblur bahut slow hai).
         fc = ("[0:v]split[a][b];"
-              "[a]scale=1080:1920:force_original_aspect_ratio=increase,"
-              "crop=1080:1920,gblur=sigma=40,eq=brightness=-0.08[bg];"
+              "[a]scale=540:960:force_original_aspect_ratio=increase,"
+              "crop=540:960,gblur=sigma=20,eq=brightness=-0.08,scale=1080:1920[bg];"
               "[b]scale=1080:-2[fg];"
               "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[vout]")
         cmd = ["ffmpeg", "-y", "-v", "error",
@@ -209,6 +212,8 @@ def make_vertical_parts(parts_dir, args):
                "-crf", str(args.crf), "-pix_fmt", "yuv420p",
                "-c:a", "copy", str(out_path)]
         run(cmd)
+        if (i + 1) % 10 == 0 or i + 1 == len(parts):
+            print(f"  vertical: {i+1}/{len(parts)} done")
     total = sum(stream_info(p)[0] for p in sorted(vdir.glob("part_*.mp4")))
     print(f"Vertical Reels: {len(parts)} parts (1080x1920) -> {vdir} | kul {total:.1f} sec")
     return vdir
