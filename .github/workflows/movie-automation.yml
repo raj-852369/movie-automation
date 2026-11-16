@@ -3,8 +3,9 @@ name: Movie Automation
 # GitHub ke free server par movie process karo.
 # Ek baar Run dabao, tab band kar do — output seedha Google Drive me
 # aa jayega: poori movie ek hi file (movie_processed.mp4) + uske
-# 2-2 minute ke parts MovieEdit/parts/ folder me
-# (part_01.mp4, part_02.mp4 ... — 2 ghante ki movie ke ~60 parts).
+# 2-2 minute ke parts ke 9:16 vertical Reels MovieEdit/reels/ folder
+# me (part_01.mp4, part_02.mp4 ... — 2 ghante ki movie ke ~60 Reels).
+# 16:9 wale (post wale) parts bilkul nahi bante — sirf Reels wale.
 # Run dabate waqt ek choice bhi poochta hai: "both" (dono), "full"
 # (sirf poori movie) ya "parts" (sirf parts). Default: both.
 #
@@ -187,18 +188,21 @@ jobs:
           rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4
           df -h
 
-      - name: Parts banao aur Drive me upload karo
+      - name: Reels parts banao aur Drive me upload karo
         if: ${{ env.OUTPUT_TYPE != 'full' }}
         run: |
           if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — GDRIVE_SA_JSON + GDRIVE_FOLDER_ID ya RCLONE_CONFIG secret check karo."; exit 1; fi
           df -h
-          python3 movie_automation.py --split-only movie_processed.mp4 --parts 120
-          rclone copy movie_processed_parts "${UPLOAD_TARGET}parts/" --retries 3
+          # Sirf 9:16 vertical Reels wale parts bante hain (user ki
+          # pasand) — 16:9 wale (post wale) parts bilkul nahi bante.
+          # Length wahi 2-2 minute rehti hai.
+          python3 movie_automation.py --split-only movie_processed.mp4 --parts 120 --vertical-parts --reels-only
+          rclone copy movie_processed_parts_vertical "${UPLOAD_TARGET}reels/" --retries 3
 
       - name: Server se sab delete karo
         if: always()
         run: |
           rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4 movie_processed.mp4 sa.json cookies.txt
-          rm -rf test_processed_parts movie_processed_parts
+          rm -rf test_processed_parts movie_processed_parts movie_processed_parts_vertical
           ls -la
           echo "Server se movie, overlay aur output sab delete kar diye."
