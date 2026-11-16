@@ -2,25 +2,34 @@ name: Movie Automation
 
 # GitHub ke free server par movie process karo.
 # Ek baar Run dabao, tab band kar do — output seedha Google Drive me
-# aa jayega: poori movie ek hi file (movie_processed.mp4) + uske
-# 2-2 minute ke parts ke 9:16 vertical Reels MovieEdit/reels/ folder
-# me (part_01.mp4, part_02.mp4 ... — 2 ghante ki movie ke ~60 Reels).
-# 16:9 wale (post wale) parts bilkul nahi bante — sirf Reels wale.
-# Run dabate waqt ek choice bhi poochta hai: "both" (dono), "full"
-# (sirf poori movie) ya "parts" (sirf parts). Default: both.
+# aa jayega: poori movie ek hi file (movie_processed.mp4).
+# Reels is workflow me NAHI bante — unke liye alag workflow hai
+# "Movie Reels" (movie-reels.yml): wo Drive se movie_processed.mp4
+# download karke uske 9:16 vertical Reels banata hai aur
+# MovieEdit/reels/ folder me upload karta hai. Is workflow ke baad
+# use chalao (ya jab bhi Reels dobara banane hon).
+# Poori movie HAMESHA upload hoti hai — koi choice nahi poochta —
+# kyunki Reels workflow ko Drive me movie_processed.mp4 chahiye
+# hoti hai. Reels nahi chahiye to bas dusra workflow mat chalao.
 #
 # Disk space ka khayal (2026-11-15 ka "No space left on device" fix):
 # GitHub ke server par sirf ~14 GB jagah hoti hai. 2 ghante ki movie
-# par ek saath movie.mp4 + overlay.mp4 + full output + parts aa jayein
-# to disk bhar jati hai — pichhli baar part_52 par aise hi fail hua
-# tha, aur usi wajah se full movie bhi Drive nahi gayi thi. Isliye:
+# par ek saath movie.mp4 + overlay.mp4 + full output aa jayein to
+# disk bhar sakti hai. Isliye:
 #   (1) shuru me hi bina kaam ke bade tools hata kar ~10 GB jagah
 #       khali ki jati hai,
 #   (2) pehle POORI movie upload hoti hai, phir original files delete
-#       karke parts bante hain — parts fail bhi ho jayein to full movie
-#       pehle se Drive me hogi,
+#       ki jati hain,
 #   (3) cleanup hamesha chalta hai (if: always()), chahe koi step fail
 #       ho jaye.
+#
+# Time ka khayal (2026-11-16 ka "The operation was canceled" fix):
+# GitHub ka ek job zyada se zyada 6 ghante chal sakta hai. 2 ghante
+# ki movie ka process (~4-5 ghante) + Reels banana (~2 ghante) ek job
+# me 6 ghante se zyada ho jata hai — isliye Reels is workflow me
+# nahi bante. Unke liye alag workflow "Movie Reels"
+# (movie-reels.yml) hai, jo Drive se bani hui movie download karke
+# sirf Reels banata hai (~2 ghante). Dono alag-alag chalao.
 #
 # Drive connect karne ke 2 tareeke hain:
 #   Tareeka 1 (rclone): secret RCLONE_CONFIG — TUMHARE apne Google
@@ -60,15 +69,6 @@ on:
         required: false
         default: false
         type: boolean
-      output_type:
-        description: "Kya chahiye — poori movie, parts, ya dono?"
-        required: false
-        default: "both"
-        type: choice
-        options:
-          - both
-          - full
-          - parts
 
 jobs:
   process:
@@ -78,7 +78,6 @@ jobs:
       HAS_COOKIES: ${{ secrets.YOUTUBE_COOKIES != '' }}
       HAS_SA: ${{ secrets.GDRIVE_SA_JSON != '' }}
       HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
-      OUTPUT_TYPE: ${{ inputs.output_type }}
     steps:
       - name: Files lao (repo se script)
         uses: actions/checkout@v4
@@ -89,7 +88,7 @@ jobs:
           # GitHub ke server par pehle se bade tools pade hote hain jo
           # humein chahiye hi nahi (dotnet, ghc, boost, android SDK).
           # Inhe hata kar ~10 GB jagah milti hai — 2 ghante ki movie
-          # ke full file + parts ke liye zaroori hai.
+          # ke liye zaroori hai.
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android || true
           df -h
 
@@ -171,33 +170,18 @@ jobs:
           echo "UPLOAD_TARGET=gdrive:MovieEdit/" >> "$GITHUB_ENV"
           rclone lsd gdrive: --max-depth 1
 
-      - name: Poori movie Drive me upload karo (choice ke hisaab se)
-        if: ${{ env.OUTPUT_TYPE != 'parts' }}
+      - name: Poori movie Drive me upload karo
         run: |
           if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — GDRIVE_SA_JSON + GDRIVE_FOLDER_ID ya RCLONE_CONFIG secret check karo."; exit 1; fi
           rclone copy movie_processed.mp4 "$UPLOAD_TARGET" --retries 3
 
-      - name: Original files delete karo (parts ke liye jagah banao)
+      - name: Original files delete karo (jagah khali karne ke liye)
         run: |
-          # Poori movie ban chuki hai (aur "parts" na chuna ho to Drive
-          # me upload bhi ho chuki hai). Original movie + overlay ab
-          # kaam ke nahi — inhe hata kar parts ke liye jagah banti hai.
-          # Pichhli baar yahi jagah na milne par "No space left" aaya
-          # tha. movie_processed.mp4 ko mat chhedo — usi se parts bante
-          # hain.
+          # Poori movie ban chuki hai aur Drive me upload bhi ho chuki
+          # hai. Original movie + overlay ab kaam ke nahi — inhe hata
+          # diya jata hai.
           rm -f movie.mp4 overlay.mp4 test_movie.mp4 test_processed.mp4
           df -h
-
-      - name: Reels parts banao aur Drive me upload karo
-        if: ${{ env.OUTPUT_TYPE != 'full' }}
-        run: |
-          if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — GDRIVE_SA_JSON + GDRIVE_FOLDER_ID ya RCLONE_CONFIG secret check karo."; exit 1; fi
-          df -h
-          # Sirf 9:16 vertical Reels wale parts bante hain (user ki
-          # pasand) — 16:9 wale (post wale) parts bilkul nahi bante.
-          # Length wahi 2-2 minute rehti hai.
-          python3 movie_automation.py --split-only movie_processed.mp4 --parts 120 --vertical-parts --reels-only
-          rclone copy movie_processed_parts_vertical "${UPLOAD_TARGET}reels/" --retries 3
 
       - name: Server se sab delete karo
         if: always()
