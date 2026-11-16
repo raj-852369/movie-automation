@@ -24,12 +24,22 @@ Ek movie par ye sab automatically lagata hai:
 7. SPLIT-ONLY - Agar file pehle se processed hai (jaise GitHub par
            full movie upload hone ke baad) to sirf parts banao:
            --split-only movie_processed.mp4 --parts 120
+8. VERTICAL REELS - Parts ko 9:16 vertical Reel ke roop me bhi banao
+           (--vertical-parts ya --vertical-only). Poora frame beech
+           me dikhta hai, peeche usi frame ka dhundhla (blurred)
+           background hota hai — kaale bars bilkul nahi hote, isliye
+           Facebook "border" wala flag nahi lagata. Length wahi rehti
+           hai (2-2 minute), sirf shape vertical hota hai.
+           --reels-only ke saath 16:9 wale parts bilkul nahi rakhe
+           jate — sirf vertical Reels wale parts bante hain.
 
 Usage:
     python movie_automation.py movie.mp4 overlay.mp4
     python movie_automation.py movie.mp4 overlay.mp4 -o final.mp4
     python movie_automation.py movie.mp4 overlay.mp4 --parts 120
     python movie_automation.py --split-only movie_processed.mp4 --parts 120
+    python movie_automation.py --split-only movie_processed.mp4 --parts 120 --vertical-parts
+    python movie_automation.py --vertical-only movie_processed.mp4
 
     movie.mp4   : original movie (tumhari, rights wali)
     overlay.mp4 : overlay karne wali dusri clip (optional bhi hai:
@@ -171,12 +181,47 @@ def vf_chain(seg, args, w, h, fps):
     return ",".join(parts), out_dur
 
 
-def split_parts(out, part_len):
+def make_vertical_parts(parts_dir, args):
+    """Har landscape part ka 9:16 vertical Reel banao.
+
+    Poora frame beech me dikhta hai; peeche usi frame ka dhundhla
+    (blurred) background hota hai — kaale bars nahi hote, isliye
+    Facebook "Your video has a border" wala flag nahi lagata.
+    Length bilkul wahi rehti hai (sirf dobara encode hota hai).
+    """
+    parts = sorted(parts_dir.glob("part_*.mp4"))
+    if not parts:
+        raise SystemExit(f"Parts nahi mile: {parts_dir}")
+    vdir = parts_dir.with_name(parts_dir.name + "_vertical")
+    vdir.mkdir(exist_ok=True)
+    for p in parts:
+        out_path = vdir / p.name
+        fc = ("[0:v]split[a][b];"
+              "[a]scale=1080:1920:force_original_aspect_ratio=increase,"
+              "crop=1080:1920,gblur=sigma=40,eq=brightness=-0.08[bg];"
+              "[b]scale=1080:-2[fg];"
+              "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[vout]")
+        cmd = ["ffmpeg", "-y", "-v", "error",
+               "-i", str(p),
+               "-filter_complex", fc,
+               "-map", "[vout]", "-map", "0:a?",
+               "-c:v", "libx264", "-preset", args.preset,
+               "-crf", str(args.crf), "-pix_fmt", "yuv420p",
+               "-c:a", "copy", str(out_path)]
+        run(cmd)
+    total = sum(stream_info(p)[0] for p in sorted(vdir.glob("part_*.mp4")))
+    print(f"Vertical Reels: {len(parts)} parts (1080x1920) -> {vdir} | kul {total:.1f} sec")
+    return vdir
+
+
+def split_parts(out, part_len, vertical=False, args=None, reels_only=False):
     """Final output ko lagbhag `part_len` sec ke parts me kaato.
 
     Fast tareeka: -c copy (dobara encode nahi), isliye kaat keyframe
     par padta hai — har part lagbhag part_len sec ka hota hai, kuch
     second upar-neeche ho sakta hai.
+    reels_only ho to vertical banne ke baad 16:9 wale parts hata
+    diye jate hain — sirf Reels wale parts rehte hain.
     """
     parts_dir = out.with_name(out.stem + "_parts")
     parts_dir.mkdir(exist_ok=True)
@@ -195,6 +240,11 @@ def split_parts(out, part_len):
     for p in parts:
         total += stream_info(p)[0]
     print(f"Parts: {len(parts)} parts (lagbhag {part_len:.0f}s ke) -> {parts_dir} | kul {total:.1f} sec")
+    if vertical:
+        make_vertical_parts(parts_dir, args)
+        if reels_only:
+            shutil.rmtree(parts_dir, ignore_errors=True)
+            print(f"Reels-only: 16:9 wale parts hata diye, sirf vertical Reels rakhe hain -> {parts_dir.name}_vertical")
     return parts_dir
 
 
@@ -221,12 +271,30 @@ def main():
     ap.add_argument("--parts", type=float, default=None, help="final output ko itne sec ke parts me kaato (120 = 2 min; default off)")
     ap.add_argument("--split-only", action="store_true",
                     help="sirf parts banao: movie argument ek pehle se processed file hai (jaise movie_processed.mp4); dobara process nahi hoga")
+    ap.add_argument("--vertical-parts", action="store_true",
+                    help="parts ke saath 9:16 vertical Reel wale parts bhi banao (blurred background, kaale bars nahi; length wahi)")
+    ap.add_argument("--reels-only", action="store_true",
+                    help="sirf Reels wale (vertical) parts banao; 16:9 wale parts mat rakho (vertical-parts bhi on ho jata hai)")
+    ap.add_argument("--vertical-only", action="store_true",
+                    help="sirf vertical Reels banao: movie argument ek pehle se processed file hai; uske <file>_parts/ folder ke parts ko vertical me badlo")
     ap.add_argument("--keep-temp", action="store_true", help="temp segment files mat hatao")
     args = ap.parse_args()
+    if args.reels_only:
+        args.vertical_parts = True
 
     for tool in ("ffmpeg", "ffprobe"):
         if shutil.which(tool) is None:
             raise SystemExit(f"'{tool}' nahi mila. Pehle ffmpeg install karo: https://ffmpeg.org/download.html")
+
+    # ---- VERTICAL-ONLY mode: pehle se bane parts ko vertical Reels me badlo
+    if args.vertical_only:
+        src = Path(args.movie)
+        parts_dir = src.with_name(src.stem + "_parts")
+        if not parts_dir.is_dir():
+            raise SystemExit(f"Parts folder nahi mila: {parts_dir} (pehle --parts se parts banao)")
+        make_vertical_parts(parts_dir, args)
+        print(f"DONE (vertical only): {parts_dir.name}_vertical/")
+        return
 
     # ---- SPLIT-ONLY mode: pehle se bani file ke sirf parts banao
     if args.split_only:
@@ -234,7 +302,7 @@ def main():
         if not src.exists():
             raise SystemExit(f"File nahi mili: {src}")
         part_len = args.parts if args.parts else 120.0
-        split_parts(src, part_len)
+        split_parts(src, part_len, vertical=args.vertical_parts, args=args, reels_only=args.reels_only)
         print(f"DONE (split only): {src.stem}_parts/")
         return
 
@@ -330,7 +398,7 @@ def main():
 
         # ---- STEP 4: 2-2 minute ke parts (agar --parts diya ho)
         if args.parts:
-            split_parts(out, args.parts)
+            split_parts(out, args.parts, vertical=args.vertical_parts, args=args, reels_only=args.reels_only)
     finally:
         if args.keep_temp:
             print(f"Temp files rakhe hain: {tmp}")
