@@ -1,0 +1,124 @@
+name: Song Detector
+
+# Movie me gaane kahan-kahan hain, ye pata karo — POORI video
+# download kiye BINA, sirf audio se.
+#
+# Kaam: MOVIE_URL secret se movie ka SIRF audio download hota hai
+# (~100-200 MB, video nahi), phir song_detect.py har 1-second
+# window me check karta hai ke wahan music hai ya nahi, aur music
+# wale hisson ki timing list de deta hai — log me bhi, aur
+# song_times.txt file me bhi (Drive > MovieEdit me upload hoti hai).
+#
+# IMPORTANT: ye "music" dhoondhta hai, "gaana" nahi — background
+# score bhi music hi hai. List me jo segments aayen, user khud
+# bataega kaunse gaane hain, phir main workflow unhe --cut se
+# kaatega. Isliye detector recall zyada rakhta hai (gaana chhootna
+# nahi chahiye); extra entries user ki confirm se nikal jayenge.
+#
+# Link secret se aata hai (MOVIE_URL) — logs me *** dikhega, link
+# nahi. Isliye repo public bhi ho to link safe hai.
+#
+# Chalane se pehle: repo Settings > Secrets and variables > Actions
+# me MOVIE_URL naam se movie ka link daalo (wahi secret jo safe
+# wale Movie Automation workflow me use hota hai). Bina iske run
+# fail hoga aur saaf message dega.
+#
+# Time: audio download ~2-5 min + analysis ~1-2 min = kul ~10-15 min.
+# Poori movie dobara download/process NAHI hoti.
+#
+# IMPORTANT: GitHub `secrets` ko step ke `if:` me use karne nahi
+# deta (error: "Unrecognized named-value: 'secrets'"). Isliye neeche
+# secrets ko pehle job ke `env:` me daala gaya hai (HAS_COOKIES,
+# HAS_SA, HAS_RCLONE), aur steps sirf `env.HAS_...` par check karte
+# hain. `if:` wali lines me kabhi `secrets.` mat likho.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MOVIE_URL: ${{ secrets.MOVIE_URL }}
+      HAS_COOKIES: ${{ secrets.YOUTUBE_COOKIES != '' }}
+      HAS_SA: ${{ secrets.GDRIVE_SA_JSON != '' }}
+      HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
+    steps:
+      - name: Files lao (repo se script)
+        uses: actions/checkout@v4
+
+      - name: Python set karo
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ffmpeg + yt-dlp + numpy install karo
+        run: |
+          which ffmpeg || sudo apt-get update && sudo apt-get install -y ffmpeg
+          pip install -q yt-dlp numpy
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+          ffmpeg -version | head -1
+
+      - name: YouTube cookies tayyar karo (agar secret hai)
+        if: ${{ env.HAS_COOKIES == 'true' }}
+        env:
+          YT_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: printf '%s' "$YT_COOKIES" > cookies.txt
+
+      - name: Link check karo (secret me hona chahiye)
+        run: |
+          if [ -z "$MOVIE_URL" ]; then
+            echo "MOVIE_URL secret nahi mila — repo Settings > Secrets and variables > Actions me movie ka link MOVIE_URL naam se daalo, phir dobara chalao."
+            exit 1
+          fi
+          echo "Link secret se mil gaya (log me nahi dikhega)."
+
+      - name: Gaane dhoondho (sirf audio se)
+        run: |
+          args=()
+          [ -f cookies.txt ] && args+=(--cookies cookies.txt)
+          python3 song_detect.py --url "$MOVIE_URL" "${args[@]}" --out song_times.txt
+          echo "---- song_times.txt ----"
+          cat song_times.txt
+
+      - name: rclone install karo
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Google Drive connect karo (service account)
+        if: ${{ env.HAS_SA == 'true' && env.HAS_RCLONE != 'true' }}
+        env:
+          SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "$SA_JSON" > sa.json
+          printf '[gdrive]\ntype = drive\nscope = drive\nservice_account_file = sa.json\nroot_folder_id = %s\n' "$FOLDER_ID" > ~/.config/rclone/rclone.conf
+          echo "UPLOAD_TARGET=gdrive:/" >> "$GITHUB_ENV"
+          rclone lsd gdrive: --max-depth 1
+
+      - name: Google Drive connect karo (rclone config)
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          echo "UPLOAD_TARGET=gdrive:MovieEdit/" >> "$GITHUB_ENV"
+          rclone lsd gdrive: --max-depth 1
+
+      - name: Timings Drive me upload karo
+        run: |
+          if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — timings phir bhi upar log me dikh rahi hain, wahan se padh lo."; exit 0; fi
+          rclone copy song_times.txt "$UPLOAD_TARGET" --retries 3
+          echo "song_times.txt Drive me upload ho gayi."
+
+      - name: Server se sab delete karo
+        if: always()
+        run: |
+          rm -f movie_audio.* song_times.txt sa.json cookies.txt
+          ls -la
+          echo "Server se audio aur timings file delete kar di."
