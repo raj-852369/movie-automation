@@ -26,12 +26,15 @@ Ek movie par ye sab automatically lagata hai:
            --split-only movie_processed.mp4 --parts 120
 8. VERTICAL REELS - Parts ko 9:16 vertical Reel ke roop me bhi banao
            (--vertical-parts ya --vertical-only). Poora frame beech
-           me dikhta hai, peeche usi frame ka dhundhla (blurred)
-           background hota hai — kaale bars bilkul nahi hote, isliye
-           Facebook "border" wala flag nahi lagata. Length wahi rehti
+           me dikhta hai, upar-neeche poora SOLID COLOR hota hai
+           (koi blur nahi, koi kaale bars nahi) — isliye Facebook
+           "border" wala flag nahi lagata. Video ke apne kaale bars
+           (letterbox) bhi auto-cut ho jate hain, to chalti video ke
+           upar-neeche kaala hissa bhi nahi aata. Length wahi rehti
            hai (2-2 minute), sirf shape vertical hota hai.
            --reels-only ke saath 16:9 wale parts bilkul nahi rakhe
            jate — sirf vertical Reels wale parts bante hain.
+           Color badalna ho to --bg-color RRGGBB (default 4A0E0E).
 
 Usage:
     python movie_automation.py movie.mp4 overlay.mp4
@@ -51,10 +54,12 @@ Requirements: ffmpeg + ffprobe PATH me hone chahiye (aur Python 3).
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 # ---------------------------------------------------------------- defaults
@@ -181,32 +186,67 @@ def vf_chain(seg, args, w, h, fps):
     return ",".join(parts), out_dur
 
 
+def detect_crop(path, seek=30.0, frames=48):
+    """Video me kaale bars (letterbox) hain ya nahi, cropdetect se pata lagao.
+
+    Bars poori movie me ek jaise rehte hain (aspect ratio ek hi hota
+    hai), isliye pehle part par ek baar check karna kaafi hai.
+    Returns 'w:h:x:y' ya None (agar poora frame hi picture hai, ya
+    pata na chale).
+    """
+    cmd = ["ffmpeg", "-v", "info", "-ss", str(seek), "-i", str(path),
+           "-vf", "cropdetect=limit=24:round=2:reset=0",
+           "-frames:v", str(frames), "-f", "null", "-"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    crops = re.findall(r"crop=(\d+:\d+:\d+:\d+)", r.stderr)
+    if not crops:
+        return None
+    # sabse zyada baar aaya hua crop lo — kisi ek dark frame ki galat
+    # reading se bachne ke liye.
+    crop = Counter(crops).most_common(1)[0][0]
+    w, h, x, y = (int(v) for v in crop.split(":"))
+    _, vw, vh, _, _ = stream_info(path)
+    if (w, h, x, y) == (vw, vh, 0, 0):
+        return None
+    return crop
+
+
 def make_vertical_parts(parts_dir, args):
     """Har landscape part ka 9:16 vertical Reel banao.
 
-    Poora frame beech me dikhta hai; peeche usi frame ka dhundhla
-    (blurred) background hota hai — kaale bars nahi hote, isliye
-    Facebook "Your video has a border" wala flag nahi lagata.
-    Length bilkul wahi rehti hai (sirf dobara encode hota hai).
+    Poora frame beech me dikhta hai; upar-neeche poora SOLID COLOR
+    hota hai (koi blur nahi, koi kaale bars nahi) — isliye Facebook
+    "Your video has a border" wala flag nahi lagata. Video ke apne
+    kaale bars (letterbox) bhi auto-cut ho jate hain, to chalti video
+    ke upar-neeche kaala hissa bhi nahi aata. Length bilkul wahi
+    rehti hai (sirf dobara encode hota hai).
     """
     parts = sorted(parts_dir.glob("part_*.mp4"))
     if not parts:
         raise SystemExit(f"Parts nahi mile: {parts_dir}")
     vdir = parts_dir.with_name(parts_dir.name + "_vertical")
     vdir.mkdir(exist_ok=True)
+    # Pehle part se kaale bars ka pata lagao (poori movie me ek jaise
+    # hote hain) — baaki sab parts par wahi crop lagega.
+    crop = detect_crop(parts[0])
+    if crop:
+        print(f"  kaale bars mile — auto-cut: crop={crop}")
+    bg = (getattr(args, "bg_color", None) or "4A0E0E").lstrip("#")
+    if len(bg) != 6 or any(c not in "0123456789abcdefABCDEF" for c in bg):
+        bg = "4A0E0E"
     for i, p in enumerate(parts):
         out_path = vdir / p.name
-        # Background blur aadhi resolution (540x960) par banta hai,
-        # phir 1080x1920 par scale hota hai — dikhne me wahi, par
-        # 3-4 guna tez (poori resolution par gblur bahut slow hai).
-        fc = ("[0:v]split[a][b];"
-              "[a]scale=540:960:force_original_aspect_ratio=increase,"
-              "crop=540:960,gblur=sigma=20,eq=brightness=-0.08,scale=1080:1920[bg];"
-              "[b]scale=1080:-2[fg];"
-              "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[vout]")
+        # crop (kaale bars hatao, agar hain) -> 1080 wide scale ->
+        # 1080x1920 solid-color canvas ke beech me rakh do (pad).
+        chain = ""
+        if crop:
+            chain += f"crop={crop},"
+        chain += (f"scale=1080:-2,"
+                  f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=0x{bg},"
+                  f"format=yuv420p[vout]")
         cmd = ["ffmpeg", "-y", "-v", "error",
                "-i", str(p),
-               "-filter_complex", fc,
+               "-filter_complex", f"[0:v]{chain}",
                "-map", "[vout]", "-map", "0:a?",
                "-c:v", "libx264", "-preset", args.preset,
                "-crf", str(args.crf), "-pix_fmt", "yuv420p",
@@ -277,7 +317,9 @@ def main():
     ap.add_argument("--split-only", action="store_true",
                     help="sirf parts banao: movie argument ek pehle se processed file hai (jaise movie_processed.mp4); dobara process nahi hoga")
     ap.add_argument("--vertical-parts", action="store_true",
-                    help="parts ke saath 9:16 vertical Reel wale parts bhi banao (blurred background, kaale bars nahi; length wahi)")
+                    help="parts ke saath 9:16 vertical Reel wale parts bhi banao (solid color background, kaale bars nahi; length wahi)")
+    ap.add_argument("--bg-color", default="4A0E0E",
+                    help="Reels me video ke upar-neeche ka solid color (6 hex digits, bina # ke; default 4A0E0E = gehra maroon)")
     ap.add_argument("--reels-only", action="store_true",
                     help="sirf Reels wale (vertical) parts banao; 16:9 wale parts mat rakho (vertical-parts bhi on ho jata hai)")
     ap.add_argument("--vertical-only", action="store_true",
