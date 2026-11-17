@@ -3,10 +3,10 @@ name: Song Detector
 # Movie me gaane kahan-kahan hain, ye pata karo — POORI video
 # download kiye BINA, sirf audio se.
 #
-# Kaam: MOVIE_URL secret se movie ka SIRF audio download hota hai
-# (~100-200 MB, video nahi), phir song_detect.py har 1-second
-# window me check karta hai ke wahan music hai ya nahi, aur music
-# wale hisson ki timing list de deta hai — log me bhi, aur
+# Kaam: Run dabate time movie ka link daalo. Us link se SIRF audio
+# download hota hai (~100-200 MB, video nahi), phir song_detect.py
+# har 1-second window me check karta hai ke wahan music hai ya nahi,
+# aur music wale hisson ki timing list de deta hai — log me bhi, aur
 # song_times.txt file me bhi (Drive > MovieEdit me upload hoti hai).
 #
 # IMPORTANT: ye "music" dhoondhta hai, "gaana" nahi — background
@@ -15,13 +15,9 @@ name: Song Detector
 # kaatega. Isliye detector recall zyada rakhta hai (gaana chhootna
 # nahi chahiye); extra entries user ki confirm se nikal jayenge.
 #
-# Link secret se aata hai (MOVIE_URL) — logs me *** dikhega, link
-# nahi. Isliye repo public bhi ho to link safe hai.
-#
-# Chalane se pehle: repo Settings > Secrets and variables > Actions
-# me MOVIE_URL naam se movie ka link daalo (wahi secret jo safe
-# wale Movie Automation workflow me use hota hai). Bina iske run
-# fail hoga aur saaf message dega.
+# Link Run karte time input me daala jata hai — wo log me dikhega.
+# Cookies aur Drive tokens secret me hi rehte hain (kabhi log me
+# nahi aate), isliye woh safe hain.
 #
 # Time: audio download ~2-5 min + analysis ~1-2 min = kul ~10-15 min.
 # Poori movie dobara download/process NAHI hoti.
@@ -34,13 +30,17 @@ name: Song Detector
 
 on:
   workflow_dispatch:
+    inputs:
+      movie_url:
+        description: "Movie ka YouTube link"
+        required: true
+        type: string
 
 jobs:
   detect:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      MOVIE_URL: ${{ secrets.MOVIE_URL }}
       HAS_COOKIES: ${{ secrets.YOUTUBE_COOKIES != '' }}
       HAS_SA: ${{ secrets.GDRIVE_SA_JSON != '' }}
       HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
@@ -67,15 +67,9 @@ jobs:
           YT_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
         run: printf '%s' "$YT_COOKIES" > cookies.txt
 
-      - name: Link check karo (secret me hona chahiye)
-        run: |
-          if [ -z "$MOVIE_URL" ]; then
-            echo "MOVIE_URL secret nahi mila — repo Settings > Secrets and variables > Actions me movie ka link MOVIE_URL naam se daalo, phir dobara chalao."
-            exit 1
-          fi
-          echo "Link secret se mil gaya (log me nahi dikhega)."
-
       - name: Gaane dhoondho (sirf audio se)
+        env:
+          MOVIE_URL: ${{ inputs.movie_url }}
         run: |
           args=()
           [ -f cookies.txt ] && args+=(--cookies cookies.txt)
