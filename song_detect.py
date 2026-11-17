@@ -85,8 +85,8 @@ def download_audio(url, cookies=None, out="movie_audio"):
             base + ["--extractor-args", "youtube:player_client=android", url],
             capture_output=True, text=True)
         if r2.returncode != 0:
-            print(r.stdout[-2000:] if r.stdout else "")
-            print(r.stderr[-2000:] if r.stderr else "", file=sys.stderr)
+            print(r2.stdout[-2000:] if r2.stdout else "")
+            print(r2.stderr[-2000:] if r2.stderr else "", file=sys.stderr)
             raise SystemExit("audio download fail ho gaya (link/cookies check karo).")
     # jo file bani, use dhoondho
     for f in os.listdir("."):
@@ -125,15 +125,23 @@ def median_filter(labels, k=5):
 
 
 def detect(audio_path, flat_thresh=FLAT_THRESH, min_len=20.0,
-           merge_gap=10.0):
-    """Audio file -> list of (start_sec, end_sec) music segments."""
+           merge_gap=5.0, loud_factor=1.5):
+    """Audio file -> list of (start_sec, end_sec) music segments.
+
+    Two-pass: pehle har window ki (rms, flatness) nikalo, phir
+    top-10% windows ki loudness se "loud" ka threshold tay karo.
+    Gaana aam taur par dialogue aur background score se KAAFI zyada
+    tez hota hai — isliye sirf tonal hona kaafi nahi, tez bhi hona
+    chahiye. Warna poori film (jisme score lagbhag hamesha chalta
+    hai) ek hi bada segment ban jati hai.
+    """
     cmd = ["ffmpeg", "-v", "error", "-i", audio_path,
            "-ac", "1", "-ar", str(SR), "-f", "s16le", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     win_samples = int(WIN_SEC * SR)
     hop_samples = int(HOP_SEC * SR)
     buf = np.zeros(0, dtype=np.int16)
-    labels = []          # 1 = music window, 0 = nahi
+    feats = []           # (rms, flat) har window ke liye
     total_sec = 0.0
     while True:
         chunk = proc.stdout.read(hop_samples * 2)  # 0.5s int16
@@ -146,16 +154,32 @@ def detect(audio_path, flat_thresh=FLAT_THRESH, min_len=20.0,
         while len(buf) >= win_samples:
             w = buf[:win_samples]
             buf = buf[hop_samples:]
-            rms, flat, zcr = window_features(w)
-            is_music = 1 if (rms >= SILENCE_RMS and flat < flat_thresh) else 0
-            labels.append(is_music)
+            feats.append(window_features(w))
     proc.wait()
     if proc.returncode != 0:
         raise SystemExit("ffmpeg audio decode fail ho gaya.")
-    if not labels:
-        return [], total_sec
+    if not feats:
+        return [], total_sec, {}
 
-    labels = median_filter(np.array(labels, dtype=int), k=5)
+    rms_arr = np.array([f[0] for f in feats])
+    flat_arr = np.array([f[1] for f in feats])
+    # Loudness ka reference: top-10% windows ka level (gaane/action
+    # jitna tez). Median isliye nahi, kyunki tez content zyada ho to
+    # median khud tez ho jata hai aur gaane bhi usse neeche reh jate
+    # hain. Gaana is reference ke aadhe se zyada tez hona chahiye.
+    ref_rms = float(np.percentile(rms_arr, 90))
+    loud_thresh = ref_rms * loud_factor if loud_factor else 0.0
+    tonal = (flat_arr < flat_thresh) & (rms_arr >= SILENCE_RMS)
+    loud = rms_arr > loud_thresh if loud_factor else np.ones(len(feats), dtype=bool)
+    labels = (tonal & loud).astype(int)
+    diag = {
+        "ref_rms": ref_rms,
+        "loud_thresh": loud_thresh,
+        "tonal_pct": 100.0 * float(np.mean(tonal)),
+        "music_pct": 100.0 * float(np.mean(labels)),
+    }
+
+    labels = median_filter(labels, k=5)
 
     # consecutive music windows -> segments (window i covers i*hop .. i*hop+win)
     segments = []
@@ -183,7 +207,7 @@ def detect(audio_path, flat_thresh=FLAT_THRESH, min_len=20.0,
 
     # chhote tukde hatao
     segments = [s for s in merged if (s[1] - s[0]) >= min_len]
-    return segments, total_sec
+    return segments, total_sec, diag
 
 
 def main():
@@ -198,10 +222,14 @@ def main():
                     help="timings file (default song_times.txt)")
     ap.add_argument("--min-len", type=float, default=20.0,
                     help="isse chhota music tukda list me nahi aayega (sec, default 20)")
-    ap.add_argument("--merge-gap", type=float, default=10.0,
-                    help="isse chhota gap bhar diya jayega (sec, default 10)")
+    ap.add_argument("--merge-gap", type=float, default=5.0,
+                    help="isse chhota gap bhar diya jayega (sec, default 5)")
     ap.add_argument("--flat-thresh", type=float, default=FLAT_THRESH,
                     help="spectral flatness threshold (default 0.30; kam = sakht)")
+    ap.add_argument("--loud-factor", type=float, default=0.5,
+                    help="gaana top-10% loudness ka kitna hissa hona chahiye (default 0.5)")
+    ap.add_argument("--no-loud", action="store_true",
+                    help="loudness wali shart hatao (sirf tonality se kaam chalao)")
     args = ap.parse_args()
 
     audio_path = args.audio
@@ -211,12 +239,17 @@ def main():
         audio_path = downloaded
 
     print("analyse ho raha hai: %s" % audio_path, flush=True)
-    segments, total = detect(audio_path, args.flat_thresh,
-                             args.min_len, args.merge_gap)
+    loud_factor = 0.0 if args.no_loud else args.loud_factor
+    segments, total, diag = detect(audio_path, args.flat_thresh,
+                                   args.min_len, args.merge_gap, loud_factor)
 
     lines = []
     lines.append("==================== SONG TIMES ====================")
     lines.append("Audio length: %s" % fmt_time(total))
+    if diag:
+        lines.append("Check: top-10%% loudness %.3f, loud limit %.3f, tonal %.0f%%, music %.0f%%" % (
+            diag["ref_rms"], diag["loud_thresh"],
+            diag["tonal_pct"], diag["music_pct"]))
     if not segments:
         lines.append("Koi music segment nahi mila (min %ds)." % int(args.min_len))
         lines.append("Ya to movie me gaane nahi hain, ya audio bahut halka hai.")
