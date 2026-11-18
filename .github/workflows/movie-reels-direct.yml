@@ -1,0 +1,147 @@
+name: Movie Reels Direct
+
+# Seedha YouTube link se Reels banao — koi overlay nahi, koi full
+# movie process nahi, sirf parts + Reels edit.
+# YouTube se movie download karo -> 2-2 minute ke parts kaato ->
+# har part ka 9:16 vertical Reel banao (upar-neeche usi video ka
+# blur, video ke kaale bars pehle auto-cut) -> Drive ke
+# MovieEdit/reels/ folder me upload karo.
+# Is run me takreeban 1.5–2 ghante lagte hain (2 ghante ki movie).
+#
+# "Movie Automation" (movie-automation.yml) aur "Movie Reels"
+# (movie-reels.yml) ko ye workflow BILKUL NAHI chhedta — ye alag
+# file hai, alag kaam ke liye. Movie wale workflow me kuch nahi
+# badla hai.
+#
+# Chahiye: repo root me reels_edit.py (Reels ke liye alag file) —
+# wahi script parts aur vertical Reels banata hai.
+# movie_automation.py se iska koi lena-dena nahi hai — movie wala
+# workflow aur uski file bilkul alag hain, unhe kuch nahi hota.
+#
+# YouTube download ke liye secret YOUTUBE_COOKIES chahiye (apne
+# browser se export ki hui cookies.txt ka poora text). Cookies
+# rotate ho jati hain — agar download fail ho ("cookies are no
+# longer valid") to fresh export karke purane secret ko Update karo,
+# phir turant dobara chalao.
+#
+# Drive connect karne ke wahi 2 tareeke hain jo baaki workflows me
+# hain (rclone config pehle, service account baad me) — wahi secrets
+# use hote hain, dobara kuch daalne ki zaroorat nahi.
+#
+# IMPORTANT: GitHub `secrets` ko step ke `if:` me use karne nahi
+# deta (error: "Unrecognized named-value: 'secrets'"). Isliye neeche
+# secrets ko pehle job ke `env:` me daala gaya hai (HAS_COOKIES,
+# HAS_SA, HAS_RCLONE), aur steps sirf `env.HAS_...` par check karte
+# hain. `if:` wali lines me kabhi `secrets.` mat likho.
+
+on:
+  workflow_dispatch:
+    inputs:
+      movie_url:
+        description: "Movie ka YouTube link"
+        required: true
+        type: string
+
+jobs:
+  reels-direct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      HAS_COOKIES: ${{ secrets.YOUTUBE_COOKIES != '' }}
+      HAS_SA: ${{ secrets.GDRIVE_SA_JSON != '' }}
+      HAS_RCLONE: ${{ secrets.RCLONE_CONFIG != '' }}
+    steps:
+      - name: Files lao (repo se script)
+        uses: actions/checkout@v4
+
+      - name: Server par jagah khali karo (pehle se)
+        run: |
+          df -h
+          # GitHub ke server par pehle se bade tools pade hote hain jo
+          # humein chahiye hi nahi (dotnet, ghc, boost, android SDK).
+          # Inhe hata kar ~10 GB jagah milti hai.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android || true
+          df -h
+
+      - name: ffmpeg check karo (na ho to install karo)
+        run: |
+          which ffmpeg || sudo apt-get update && sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+
+      - name: yt-dlp install karo
+        run: |
+          pip install -q yt-dlp
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+
+      - name: YouTube cookies tayyar karo (agar secret hai)
+        if: ${{ env.HAS_COOKIES == 'true' }}
+        env:
+          YT_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: printf '%s' "$YT_COOKIES" > cookies.txt
+
+      - name: Movie download karo (YouTube link se)
+        run: |
+          args=()
+          [ -f cookies.txt ] && args+=(--cookies cookies.txt)
+          # EJS solver: YouTube ke "n challenge" (JS challenge) ko solve
+          # karne ke liye chahiye — bina iske formats hi nahi milte
+          # ("Only images are available" / "Requested format is not
+          # available"). Agar pehla tareeka fail ho to android client
+          # se automatic dobara try karta hai.
+          download() {
+            local url="$1" out="$2"
+            if yt-dlp --no-playlist --retries 3 "${args[@]}" --remote-components ejs:github -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o "$out" "$url"; then
+              return 0
+            fi
+            echo "Pehla tareeka fail — android client se dobara try kar raha hoon..."
+            yt-dlp --no-playlist --retries 3 "${args[@]}" --remote-components ejs:github --extractor-args "youtube:player_client=android" -f "bv*[height<=1080]+ba/b[height<=1080]" --merge-output-format mp4 -o "$out" "$url"
+          }
+          download "${{ inputs.movie_url }}" movie.mp4
+          ls -lh movie.mp4
+
+      - name: rclone install karo
+        run: |
+          curl https://rclone.org/install.sh | sudo bash
+          rclone version
+
+      - name: Google Drive connect karo (service account)
+        if: ${{ env.HAS_SA == 'true' && env.HAS_RCLONE != 'true' }}
+        env:
+          SA_JSON: ${{ secrets.GDRIVE_SA_JSON }}
+          FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "$SA_JSON" > sa.json
+          printf '[gdrive]\ntype = drive\nscope = drive\nservice_account_file = sa.json\nroot_folder_id = %s\n' "$FOLDER_ID" > ~/.config/rclone/rclone.conf
+          echo "UPLOAD_TARGET=gdrive:/" >> "$GITHUB_ENV"
+          rclone lsd gdrive: --max-depth 1
+
+      - name: Google Drive connect karo (rclone config)
+        if: ${{ env.HAS_RCLONE == 'true' }}
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          echo "UPLOAD_TARGET=gdrive:MovieEdit/" >> "$GITHUB_ENV"
+          rclone lsd gdrive: --max-depth 1
+
+      - name: Reels banao aur Drive me upload karo
+        run: |
+          if [ -z "$UPLOAD_TARGET" ]; then echo "Drive connect nahi hua — GDRIVE_SA_JSON + GDRIVE_FOLDER_ID ya RCLONE_CONFIG secret check karo."; exit 1; fi
+          df -h
+          # Sirf parts + Reels edit — koi overlay nahi, koi speed/
+          # mirror/hourly effect nahi. 2-2 minute ke parts, har part
+          # ka 9:16 vertical Reel (upar-neeche usi video ka blur,
+          # kaale bars pehle auto-cut). 16:9 wale parts nahi rakhte.
+          python3 reels_edit.py --split-only movie.mp4 --parts 120 --vertical-parts --reels-only
+          rclone copy "movie_parts_vertical" "${UPLOAD_TARGET}reels/" --retries 3
+
+      - name: Server se sab delete karo
+        if: always()
+        run: |
+          rm -f movie.mp4 sa.json cookies.txt
+          rm -rf movie_parts movie_parts_vertical
+          ls -la
+          echo "Server se movie aur Reels delete kar diye."
